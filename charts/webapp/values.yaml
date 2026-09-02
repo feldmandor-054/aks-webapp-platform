@@ -1,0 +1,103 @@
+# Defaults shared by all environments. Environment files (values-<env>.yaml) override.
+
+image:
+  repository: ghcr.io/OWNER/webapp # set by CI: --set image.repository=ghcr.io/<owner>/webapp
+  tag: "" # immutable git SHA, set by CI: --set image.tag=<sha>. Falls back to Chart.appVersion.
+  pullPolicy: IfNotPresent
+
+env: local
+
+replicaCount: 2
+
+# Zero-downtime rollouts: never take a pod down before its replacement is Ready.
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+containerPort: 8080
+
+service:
+  type: ClusterIP
+  port: 80
+
+ingress:
+  enabled: true
+  className: webapprouting.kubernetes.azure.com # AKS application routing add-on
+  host: "" # empty = match any host (dev has no DNS); prod sets a real hostname
+  annotations: {}
+  tls: [] # cert-manager / Key Vault integration is a follow-up
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 96Mi
+  limits:
+    # Memory limit protects neighbours; CPU limit deliberately generous to avoid
+    # CFS throttling latency (see README troubleshooting section).
+    cpu: 500m
+    memory: 192Mi
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+# Spread replicas across nodes/zones; "soft" so a single-node dev cluster still schedules.
+topologySpread:
+  enabled: true
+  whenUnsatisfiable: ScheduleAnyway
+
+probes:
+  liveness:
+    path: /healthz
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    failureThreshold: 3
+  readiness:
+    path: /readyz
+    initialDelaySeconds: 3
+    periodSeconds: 5
+    failureThreshold: 3
+  startup:
+    path: /healthz
+    periodSeconds: 2
+    failureThreshold: 15
+
+# Prometheus scrape hints (Managed Prometheus / kube-prometheus-stack pick these up).
+metrics:
+  enabled: true
+  path: /metrics
+
+serviceAccount:
+  create: true
+  annotations: {}
+
+# Hardened by default: non-root, read-only FS, no capabilities, no privilege escalation.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+# Graceful shutdown: let the ingress drain connections before SIGTERM.
+terminationGracePeriodSeconds: 20
+preStopSleepSeconds: 3
+
+nodeSelector: {}
+tolerations: []
+extraEnv: []

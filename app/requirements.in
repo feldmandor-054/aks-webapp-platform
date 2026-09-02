@@ -1,0 +1,6 @@
+# Direct runtime dependencies. requirements.txt is the fully pinned resolution of this file:
+#   pip install -r requirements.in && pip freeze > requirements.txt
+# Pinning the whole tree makes builds reproducible and lets Trivy scan transitive packages.
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+prometheus-client==0.26.0

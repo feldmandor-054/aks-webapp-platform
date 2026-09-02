@@ -1,0 +1,7 @@
+apiVersion: v2
+name: webapp
+description: Small FastAPI web service with probes, HPA, PDB and ingress.
+type: application
+# Chart version bumps when templates change; appVersion is overridden per deploy with the image tag.
+version: 0.1.0
+appVersion: "dev"

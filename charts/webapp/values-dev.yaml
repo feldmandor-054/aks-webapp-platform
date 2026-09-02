@@ -1,0 +1,19 @@
+# DEV: small footprint on a single burstable node; public ingress by IP (no DNS yet).
+env: dev
+
+replicaCount: 2
+
+autoscaling:
+  minReplicas: 2
+  maxReplicas: 3
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 300m
+    memory: 128Mi
+
+ingress:
+  host: ""

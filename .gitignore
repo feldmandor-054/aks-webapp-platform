@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# Terraform - state and secrets never enter git
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+tfplan
+plan.txt
+crash.log
+*.auto.tfvars
+*secret*.tfvars
+.terraform.lock.hcl.bak
+infra/bootstrap/*.env
+
+# Helm
+charts/**/charts/
+*.tgz
+
+# Local
+.env
+*.kubeconfig
+kubeconfig*
+.DS_Store
+Thumbs.db
+
+# Lock files belong to root modules (envs/*), not to reusable modules
+infra/modules/**/.terraform.lock.hcl
+
+# Assignment brief is the company's document - kept local, not published
+*.docx
+Assignment*.md

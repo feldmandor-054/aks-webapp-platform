@@ -1,0 +1,120 @@
+# Infrastructure pipeline: plan on PR (posted as a comment), apply on main after environment approval.
+# Uses the *infra* identity (Owner on the workload RG only) via OIDC; no secrets stored.
+name: Terraform
+
+on:
+  pull_request:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+  push:
+    branches: [main]
+    paths: ["infra/**", ".github/workflows/terraform.yml"]
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        options: [dev, prod]
+        default: dev
+      action:
+        type: choice
+        options: [plan, apply, destroy]
+        default: plan
+
+concurrency:
+  group: terraform-${{ inputs.environment || 'dev' }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+env:
+  TF_ENV: ${{ inputs.environment || 'dev' }}
+  TF_IN_AUTOMATION: "true"
+  TF_INPUT: "false"
+  # azurerm provider + backend authenticate with the GitHub OIDC token.
+  ARM_USE_OIDC: "true"
+  ARM_USE_AZUREAD: "true"
+  ARM_CLIENT_ID: ${{ vars.AZURE_INFRA_CLIENT_ID }}
+  ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+  # Identity inputs (object IDs) are repository variables, never committed.
+  TF_VAR_deployer_object_id: ${{ vars.TF_VAR_deployer_object_id }}
+  TF_VAR_cluster_admin_object_ids: ${{ vars.TF_VAR_cluster_admin_object_ids }}
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/envs/${{ inputs.environment || 'dev' }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.exitcode == '2' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+
+      - run: terraform fmt -check -recursive -diff
+        working-directory: infra
+      - run: terraform init -backend-config=backend.hcl
+      - run: terraform validate -no-color
+
+      - name: terraform plan
+        id: plan
+        run: |
+          set +e
+          if [ "${{ inputs.action }}" = "destroy" ]; then extra="-destroy"; fi
+          terraform plan $extra -no-color -detailed-exitcode -out=tfplan 2>&1 | tee plan.txt
+          code=${PIPESTATUS[0]}
+          echo "exitcode=$code" >> "$GITHUB_OUTPUT"
+          [ "$code" = "1" ] && exit 1 || exit 0
+
+      - name: Comment plan on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync('infra/envs/${{ env.TF_ENV }}/plan.txt', 'utf8');
+            if (plan.length > 60000) plan = plan.slice(-60000);
+            const body = `#### Terraform plan — \`${{ env.TF_ENV }}\`\n<details><summary>Show plan</summary>\n\n\`\`\`\n${plan}\n\`\`\`\n</details>`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: tfplan-${{ env.TF_ENV }}
+          path: infra/envs/${{ env.TF_ENV }}/tfplan
+          retention-days: 1
+
+  apply:
+    name: apply
+    needs: plan
+    # Apply only on main pushes or explicit dispatch, and only if the plan has changes.
+    if: >
+      github.event_name != 'pull_request' &&
+      needs.plan.outputs.has_changes == 'true' &&
+      (github.event_name == 'push' || inputs.action == 'apply' || inputs.action == 'destroy')
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment || 'dev' }}
+    defaults:
+      run:
+        working-directory: infra/envs/${{ inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_wrapper: false
+      - run: terraform init -backend-config=backend.hcl
+      - uses: actions/download-artifact@v4
+        with:
+          name: tfplan-${{ env.TF_ENV }}
+          path: infra/envs/${{ env.TF_ENV }}
+      - name: terraform apply (saved plan)
+        run: terraform apply -no-color tfplan
+      - name: Outputs
+        run: terraform output -no-color | tee -a "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,35 @@
+# PROD: more headroom, hard spread across zones, real hostname + TLS.
+env: prod
+
+replicaCount: 3
+
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 12
+  targetCPUUtilizationPercentage: 60
+
+podDisruptionBudget:
+  minAvailable: 2
+
+topologySpread:
+  whenUnsatisfiable: DoNotSchedule
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 256Mi
+
+ingress:
+  host: webapp.example.com
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+  tls:
+    - hosts: [webapp.example.com]
+      secretName: webapp-tls # issued by cert-manager (follow-up)
+
+# Run on the dedicated user pool, off the system nodes.
+nodeSelector:
+  agentpool: user

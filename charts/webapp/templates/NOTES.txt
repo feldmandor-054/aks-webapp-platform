@@ -1,0 +1,6 @@
+{{ .Release.Name }} ({{ include "webapp.imageTag" . }}) deployed to namespace {{ .Release.Namespace }} [{{ .Values.env }}].
+
+Check rollout:   kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "webapp.fullname" . }}
+Ingress address: kubectl -n {{ .Release.Namespace }} get ingress {{ include "webapp.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+History:         helm -n {{ .Release.Namespace }} history {{ .Release.Name }}
+Rollback:        helm -n {{ .Release.Namespace }} rollback {{ .Release.Name }} <REVISION>

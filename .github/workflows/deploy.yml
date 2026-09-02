@@ -1,0 +1,123 @@
+# Deploy: Helm-releases an already-built, immutable image tag into one environment.
+#   - called by CI for dev after every main build
+#   - run manually (workflow_dispatch) to PROMOTE a tag to prod, or to roll back to an older tag
+# The `prod` GitHub Environment requires a reviewer, which is the promotion gate.
+name: Deploy
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        required: true
+        type: string
+      image_tag:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [dev, prod]
+        required: true
+      image_tag:
+        description: Image tag to deploy (sha-xxxxxxxxxxxx). Use an older tag to roll back.
+        type: string
+        required: true
+
+concurrency:
+  group: deploy-${{ inputs.environment }}
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    name: helm upgrade (${{ inputs.environment }})
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+      url: ${{ steps.smoke.outputs.url }}
+    env:
+      ENV: ${{ inputs.environment }}
+      TAG: ${{ inputs.image_tag }}
+      RELEASE: webapp
+      RESOURCE_GROUP: rg-webapp-${{ inputs.environment }}
+      CLUSTER: aks-webapp-${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (OIDC, no stored secret)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_DEPLOY_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: latest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # needed to resolve "latest" from GitHub releases
+
+      - uses: azure/aks-set-context@v4
+        with:
+          resource-group: ${{ env.RESOURCE_GROUP }}
+          cluster-name: ${{ env.CLUSTER }}
+          use-kubelogin: "true"
+
+      - uses: azure/setup-helm@v4
+
+      - name: Ensure namespace with restricted Pod Security Admission
+        run: |
+          kubectl create namespace "$ENV" --dry-run=client -o yaml | kubectl apply -f -
+          kubectl label namespace "$ENV" --overwrite \
+            pod-security.kubernetes.io/enforce=restricted \
+            pod-security.kubernetes.io/warn=restricted
+
+      - name: Helm upgrade --install (atomic)
+        run: |
+          owner="${{ github.repository_owner }}"
+          echo "Previous revision:"; helm -n "$ENV" history "$RELEASE" --max 3 2>/dev/null || echo "(first release)"
+          helm upgrade --install "$RELEASE" charts/webapp \
+            --namespace "$ENV" \
+            -f charts/webapp/values-"$ENV".yaml \
+            --set image.repository="ghcr.io/${owner,,}/webapp" \
+            --set image.tag="$TAG" \
+            --atomic --wait --timeout 5m --history-max 10
+
+      - name: Smoke test through the ingress
+        id: smoke
+        run: |
+          for i in $(seq 1 30); do
+            ip=$(kubectl -n "$ENV" get ingress "$RELEASE" -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || true)
+            [ -n "$ip" ] && break; sleep 10
+          done
+          [ -z "$ip" ] && { echo "no ingress IP"; exit 1; }
+          url="http://$ip"; echo "url=$url" >> "$GITHUB_OUTPUT"
+          for i in $(seq 1 12); do
+            body=$(curl -fsS --max-time 5 "$url/" 2>/dev/null) && break; sleep 5
+          done
+          echo "$body"
+          echo "$body" | grep -q "\"version\":\"$TAG\"" || { echo "version mismatch"; exit 1; }
+          curl -fsS "$url/healthz" && curl -fsS "$url/readyz"
+
+      - name: Roll back if smoke test failed
+        if: failure() && steps.smoke.outcome == 'failure'
+        run: |
+          echo "Smoke test failed - rolling back to previous revision"
+          helm -n "$ENV" rollback "$RELEASE" --wait --timeout 3m
+          helm -n "$ENV" history "$RELEASE" --max 5
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### ${ENV}: ${TAG}"
+            echo
+            echo "URL: ${{ steps.smoke.outputs.url }}"
+            echo
+            echo '```'; helm -n "$ENV" history "$RELEASE" --max 5 2>/dev/null; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
