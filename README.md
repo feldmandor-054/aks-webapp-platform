@@ -20,13 +20,33 @@ Full diagrams and decision tables: **[docs/architecture.md](docs/architecture.md
                                                                           │
                      ┌────────────────────────────────────────────────────┘
                      ▼
-        Deploy (helm upgrade --atomic) ──► AKS namespace dev ──► managed NGINX ingress ──► public IP
+        Deploy (helm upgrade --atomic) ──► cluster aks-webapp-dev, namespace dev ──► managed NGINX ingress ──► public IP
                      ▲
-        manual dispatch env=prod tag=sha-xxxx (GitHub Environment approval) = promotion / rollback
+        manual dispatch env=prod tag=sha-xxxx (GitHub Environment approval) ──► cluster aks-webapp-prod
+        same image, values-prod.yaml                                            = promotion / rollback
 
- Terraform (plan on PR, apply on main w/ approval) ──► rg-webapp-dev: VNet · AKS (Free, 1×B2als_v2→2) · Log Analytics
+ Terraform (plan on PR, apply on main w/ approval) ──► rg-webapp-<env>: VNet · AKS (Free, 1×B2als_v2→2) · Log Analytics
+                                                       one cluster per environment; only dev is applied (cost)
  Identity: GitHub OIDC ──► Entra SP "infra" (Owner on RG)  /  Entra SP "deploy" (AKS RBAC only)
 ```
+
+### Environments
+
+"Environment" means three distinct things here, and they are deliberately kept aligned by name:
+
+| Layer | `dev` | `prod` | Defined in |
+|---|---|---|---|
+| **Terraform environment** — own state file, own resource group, **own AKS cluster** | `rg-webapp-dev` / `aks-webapp-dev` — applied | `rg-webapp-prod` / `aks-webapp-prod` — defined, *not applied* (cost) | `infra/envs/<env>/` (identical `*.tf`; only `terraform.tfvars` + `backend.hcl` differ) |
+| **Kubernetes namespace** inside that cluster, labelled PSA `restricted` | `dev` | `prod` | created by `deploy.yml` |
+| **GitHub Environment** — protection rules + OIDC federated subject | no reviewer: merges to `main` deploy automatically | **required reviewer** — this is the promotion gate | GitHub repo settings; subjects created by `bootstrap.sh` |
+
+The same chart serves both; only `charts/webapp/values-<env>.yaml` differs (replicas, resources, HPA/PDB
+bounds, hard vs soft topology spread, hostname + TLS, dedicated node pool). Templates never fork per
+environment, so there is no environment-specific code path that can rot unnoticed — and `helm template`
+renders **both** values files in CI on every commit, which is what keeps the unapplied prod path honest.
+
+Because the prod GitHub Environment gates the OIDC token whose subject is `...:environment:prod`, the
+human approval and the credential to reach prod are the *same* gate: no approval, no Azure token.
 
 ### What runs where
 
@@ -265,18 +285,18 @@ Prometheus/Grafana + OpenTelemetry; CMK encryption, audit logging and Azure Poli
 
 | Chosen | Instead of | Because |
 |---|---|---|
-| One AKS cluster, `dev`/`prod` **namespaces** | Cluster per environment | Free-account budget; `infra/envs/prod` shows the real per-env cluster and is applied by the same pipeline |
+| **Cluster per environment** (`aks-webapp-dev` / `aks-webapp-prod`), each with its own resource group and state file — but **only `dev` was actually applied** | Applying both environments | Cluster-per-environment is the design (see `infra/modules/platform/main.tf`, and `deploy.yml` which targets `aks-webapp-<env>`); a second cluster would roughly double the ~$1/day, so prod stays defined-but-not-applied. `helm template -f values-prod.yaml` runs in CI on every commit, so the prod path is verified to render even though it is never deployed. Bringing prod up is one `terraform apply` |
 | 1× B2als_v2 node, no AZs, Free tier | 3 AZ, Standard tier | ~$1/day vs ~$10/day; prod tfvars flips it. Burstable VM credit exhaustion is a known dev-only risk |
 | Single region `israelcentral` for everything (state, identities' scope, workloads) | `northeurope` (first attempt) | Free subscriptions whitelist VM SKUs per region; B2s was rejected in northeurope (`az vm list-skus` shows `NotAvailableForSubscription`). israelcentral allows B2als_v2/D2s_v5, is closest to the team, and keeping state + workloads in one region simplifies data-residency and cost reporting |
 | GHCR public image | ACR + private endpoint | Free; deploy identity needs no pull secret. Prod uses ACR with Defender scanning |
 | Managed NGINX add-on, HTTP only | cert-manager + TLS | No DNS name in the assignment; add-on supports Key Vault certs once a hostname exists |
 | Resource groups created by bootstrap | Terraform-created RGs | Lets the CI identity be **RG-scoped** instead of subscription Contributor |
-| `AKS RBAC Cluster Admin` for the deploy identity | Namespace-scoped `RBAC Writer` | Helm needs to create namespaces; once namespaces are Terraform-managed the role shrinks |
+| `AKS RBAC Cluster Admin` for the deploy identity | Namespace-scoped `RBAC Writer` | The deploy job creates and labels the namespace itself (`deploy.yml`), which needs cluster-scoped rights. Moving namespace creation + PSA labels into Terraform would let this drop to `RBAC Writer` on one namespace — the single biggest privilege reduction still available here |
 | GitHub Actions | Jenkins | Nothing to host, native OIDC, environments with approvals; Jenkins would add a server to secure |
 
 ## 9. What I would do with more time
 
-1. Separate prod cluster/subscription applied through the same pipeline; private API server; NetworkPolicy default-deny.
+1. Actually apply the prod environment (already defined in `infra/envs/prod`, rendered by CI, never deployed) — ideally in its own subscription; private API server; NetworkPolicy default-deny.
 2. TLS via the add-on's Key Vault integration or cert-manager; real DNS zone managed by Terraform.
 3. Key Vault + Secrets Store CSI with per-service Workload Identity; External Secrets for GitOps.
 4. Managed Prometheus + Grafana, SLO alerts, OpenTelemetry tracing; synthetic checks from outside Azure.
