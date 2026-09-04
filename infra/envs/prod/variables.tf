@@ -12,14 +12,15 @@ variable "resource_group_name" {
   type        = string
 }
 
+# No defaults: each environment must state its own address space in terraform.tfvars.
+# Overlapping ranges cannot be VNet-peered, so a silent default would block the
+# hub-and-spoke topology later. dev 10.10 / staging 10.15 / prod 10.20.
 variable "vnet_cidr" {
-  type    = string
-  default = "10.10.0.0/16"
+  type = string
 }
 
 variable "aks_subnet_cidr" {
-  type    = string
-  default = "10.10.0.0/22"
+  type = string
 }
 
 variable "aks_sku_tier" {

@@ -3,6 +3,12 @@
 environment         = "prod"
 resource_group_name = "rg-webapp-prod"
 
+# Non-overlapping with dev (10.10.0.0/16) and the reserved staging range (10.15.0.0/16),
+# so all environments can be peered into a hub VNet without renumbering. A /22 subnet gives
+# ~1000 node/pod-overlay addresses, enough for the 3-12 node user pool.
+vnet_cidr       = "10.20.0.0/16"
+aks_subnet_cidr = "10.20.0.0/22"
+
 # Standard tier = 99.95% API-server SLA; zone-redundant nodes; workloads isolated on a user pool.
 aks_sku_tier       = "Standard"
 node_vm_size       = "Standard_D2s_v5"
