@@ -4,10 +4,22 @@ Production-oriented deployment of a small containerized web service on **Azure K
 3-hour DevOps home assignment. Everything is code: Terraform for infrastructure, Helm for the workload, GitHub
 Actions for CI/CD, OIDC for identity. No secrets are stored anywhere.
 
-> **Live (dev):** http://20.217.176.21/ (`/healthz`, `/readyz`, `/metrics`) — region `israelcentral`.
-> The latest [Deploy run](../../actions/workflows/deploy.yml) always shows the current address. The cluster is
-> destroyed when not needed (`scripts/teardown.sh`), so the IP may be gone by the time you read this; the pipeline
-> recreates everything from scratch in ~12 minutes.
+> **Live (dev):** region `israelcentral`, endpoints `/`, `/healthz`, `/readyz`, `/metrics`.
+> The address is deliberately not written down here: it belongs to the ingress controller's `LoadBalancer`
+> Service and is allocated by Azure per cluster, so it changes whenever the cluster is rebuilt. To get the
+> current one:
+>
+> ```bash
+> # from the pipeline - the Deploy run's environment URL and job summary carry it
+> gh run view --workflow Deploy --json jobs --jq '.jobs[].steps[].name' # or open the run in the UI
+>
+> # or straight from the cluster
+> kubectl -n dev get ingress webapp -o jsonpath='{.status.loadBalancer.ingress[0].ip}'
+> ```
+>
+> The cluster is destroyed when not in use (`scripts/teardown.sh`), so it may not be running when you read
+> this; the pipeline recreates everything from scratch in ~12 minutes. Giving the endpoint a stable name
+> (reserved static IP, or a DNS zone attached to the app-routing add-on) is listed in §9.
 
 ---
 
@@ -142,15 +154,21 @@ az group list -o table          # MC_rg-webapp-dev_* must be gone; it holds the 
 
 Set a budget alert while the cluster is up: **Cost Management → Budgets** (e.g. $5/month, alert at 80 %).
 
-### 3b. Evidence from the real run (2026-09-02)
+### 3b. Evidence from a real run
+
+Reproduce any of this against a running cluster — `$INGRESS_IP` is resolved, never hardcoded:
+
+```bash
+INGRESS_IP=$(kubectl -n dev get ingress webapp -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+```
 
 ```text
-$ curl -s http://20.217.176.21/
-{"service":"webapp","version":"sha-8f0d2ea5ff7d","environment":"dev","hostname":"webapp-6ccf998d58-666mh"}   [200, 13 ms]
+$ curl -s "http://$INGRESS_IP/"
+{"service":"webapp","version":"sha-<git-sha>","environment":"dev","hostname":"webapp-<pod>","message":"Hello world"}   [200, ~13 ms]
 
 $ kubectl -n dev get deploy,ingress,hpa,pdb
 deployment.apps/webapp              2/2     2            2
-ingress.networking.k8s.io/webapp    webapprouting.kubernetes.azure.com   *   20.217.176.21   80
+ingress.networking.k8s.io/webapp    webapprouting.kubernetes.azure.com   *   <ingress-ip>   80
 horizontalpodautoscaler/webapp      Deployment/webapp   cpu: 1%/70%   2   3
 poddisruptionbudget/webapp          MIN AVAILABLE 1
 
@@ -160,11 +178,12 @@ $ kubectl get ns dev -o jsonpath='{.metadata.labels}'
 $ kubectl -n dev get pod -l app.kubernetes.io/name=webapp -o jsonpath='{.items[0].spec.containers[0].securityContext}'
 {"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"readOnlyRootFilesystem":true}
 
-# Rollback by tag: Deploy workflow dispatched with the previous image tag -> smoke test verified the served version
+# Rollback by tag: Deploy workflow dispatched with an earlier image tag.
+# The smoke test asserts the *served* version equals the requested tag, so a silent no-op fails the job.
 $ helm -n dev history webapp
 REVISION  STATUS      DESCRIPTION
-1         superseded  Install complete      (sha-8f0d2ea5ff7d)
-2         deployed    Upgrade complete      (sha-0161987b223d)
+1         superseded  Install complete      (newer tag)
+2         deployed    Upgrade complete      (earlier tag - the rollback)
 ```
 
 Pipeline runs: [Terraform apply (12 added)](../../actions/workflows/terraform.yml) ·
