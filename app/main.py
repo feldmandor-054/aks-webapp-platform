@@ -43,6 +43,7 @@ def root() -> dict[str, str]:
         "version": APP_VERSION,
         "environment": APP_ENV,
         "hostname": socket.gethostname(),
+        "message": "Hello world",
     }
 
 

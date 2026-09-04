@@ -10,6 +10,7 @@ def test_root_returns_metadata():
     assert r.status_code == 200
     body = r.json()
     assert body["service"] == "webapp"
+    assert body["message"] == "Hello world"
     assert {"version", "environment", "hostname"} <= body.keys()
 
 
